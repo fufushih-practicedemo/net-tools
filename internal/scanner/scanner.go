@@ -10,6 +10,7 @@ import (
 
 type Scanner struct {
 	Timeout time.Duration
+	Workers int
 }
 
 type ScanResult struct {
@@ -17,10 +18,11 @@ type ScanResult struct {
 	OpenPorts []int
 }
 
-// NewScanner creates a new scanner with default timeout
+// NewScanner creates a new scanner with default timeout and workers
 func NewScanner() *Scanner {
 	return &Scanner{
 		Timeout: 500 * time.Millisecond,
+		Workers: 100, // Default using 100 workers
 	}
 }
 
@@ -29,34 +31,54 @@ func (s *Scanner) SetTimeout(timeout time.Duration) {
 	s.Timeout = timeout
 }
 
+// SetWorkers sets the number of concurrent workers
+func (s *Scanner) SetWorkers(workers int) {
+	if workers <= 0 {
+		workers = 1
+	}
+	s.Workers = workers
+}
+
 func (s *Scanner) ScanPorts(host string, startPort, endPort int) (*ScanResult, error) {
 	fmt.Printf("Scanning ports %d-%d on %s...\n", startPort, endPort, host)
 
 	var wg sync.WaitGroup
 	openPorts := make(chan int, endPort-startPort+1)
+	ports := make(chan int, endPort-startPort+1)
 
-	for port := startPort; port <= endPort; port++ {
+	// Start workers
+	for i := 0; i < s.Workers; i++ {
 		wg.Add(1)
-		go func(p int) {
+		go func() {
 			defer wg.Done()
-
-			if s.isPortOpen(host, p) {
-				openPorts <- p
+			for port := range ports {
+				if s.isPortOpen(host, port) {
+					openPorts <- port
+				}
 			}
-		}(port)
+		}()
 	}
 
+	// Send ports to channel
+	go func() {
+		for port := startPort; port <= endPort; port++ {
+			ports <- port
+		}
+		close(ports)
+	}()
+
+	// Wait for all workers to complete
 	wg.Wait()
 	close(openPorts)
 
-	var ports []int
+	var resultPorts []int
 	for p := range openPorts {
-		ports = append(ports, p)
+		resultPorts = append(resultPorts, p)
 	}
 
 	return &ScanResult{
 		Host:      host,
-		OpenPorts: ports,
+		OpenPorts: resultPorts,
 	}, nil
 }
 
